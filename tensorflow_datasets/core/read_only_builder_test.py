@@ -18,13 +18,14 @@
 import functools
 import os
 import pathlib
+import re
 from typing import Sequence
 from unittest import mock
 
 import dill
+from etils import epath
 import pytest
 import tensorflow as tf
-
 from tensorflow_datasets import testing
 from tensorflow_datasets.core import constants
 from tensorflow_datasets.core import dataset_builder
@@ -37,6 +38,7 @@ from tensorflow_datasets.core import splits as splits_lib
 from tensorflow_datasets.core import utils
 from tensorflow_datasets.core.features import features_dict
 from tensorflow_datasets.core.proto import dataset_info_pb2
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.core.utils import file_utils
 
 from google.protobuf import json_format
@@ -252,6 +254,17 @@ _find_builder_dir = functools.partial(
     read_only_builder._find_builder_dir, data_dir='path/to')
 
 
+def test_find_builder_dir_with_namespace_given():
+  namespace = 'ns'
+  ds = f'{namespace}:ds'
+  error_msg = re.escape(('\nBuilder cannot be find if it uses namespaces '
+                         f'(here, {namespace} is used)'))
+  with (pytest.raises(registered.DatasetNotFoundError, match=error_msg),
+        error_utils.reraise_with_context(registered.DatasetNotFoundError)):
+    assert _find_builder_dir(ds) is None
+    raise registered.DatasetNotFoundError
+
+
 def test_find_builder_dir_with_multiple_data_dir(mock_fs: testing.MockFs):
   mock_fs.add_file('path/to/ds0/1.0.0/features.json')
 
@@ -349,27 +362,44 @@ def test_find_builder_config_code(mock_fs: testing.MockFs):
   mock_fs.add_file('path/to/my_dataset/old_config/1.0.0/features.json')
   mock_fs.add_file('path/to/my_dataset/broken_config/features.json')
 
-  # If code can be reached, use it to load the default config name
+  # If code can be reached, use it to load the default config name.
   # Note that the existing version is loaded, even if the code is at a
   # more recent version.
   assert (_find_builder_dir('my_dataset') ==
           'path/to/my_dataset/default_config/1.0.0')
-  # Old version from before configs.
+  # Old version from previous configs.
   assert _find_builder_dir('my_dataset:0.0.1') == 'path/to/my_dataset/0.0.1'
   # Explicitly given version with no config, use folder without config.
   assert _find_builder_dir('my_dataset:0.1.0') == 'path/to/my_dataset/0.1.0'
   # Explicitly given version and config, use folder with config.
   assert (_find_builder_dir('my_dataset/default_config:0.1.0') ==
           'path/to/my_dataset/default_config/0.1.0')
-  # When config is explicitly given, load the last detected version
+  # When config is explicitly given, load the last detected version.
   assert (_find_builder_dir('my_dataset/other_config') ==
           'path/to/my_dataset/other_config/1.0.0')
   assert (_find_builder_dir('my_dataset/old_config') ==
           'path/to/my_dataset/old_config/1.0.0')
   assert (_find_builder_dir('my_dataset/old_config:0.8.0') ==
           'path/to/my_dataset/old_config/0.8.0')
+  # When no config found, return None.
   assert _find_builder_dir('my_dataset/broken_config') is None
   assert _find_builder_dir('my_dataset/unknown_config') is None
+
+
+def test_get_default_config_name_permission_error():
+  # Raise populated error message in case of PermissionError
+  builder_dir = epath.Path('builder/dir')
+  error_msg = ('We couldn\'t load the required dataset config name from the '
+               'builder dir.\n Please ensure that you have access to the '
+               f'builder directory: {builder_dir}')
+  with (pytest.raises(registered.DatasetNotFoundError, match=error_msg),
+        error_utils.reraise_with_context(registered.DatasetNotFoundError),
+        mock.patch.object(
+            registered, 'imported_builder_cls', side_effect=PermissionError)):
+    actual_default_config_name = read_only_builder._get_default_config_name(
+        builder_dir=builder_dir, name='name')
+    assert actual_default_config_name is None
+    raise registered.DatasetNotFoundError
 
 
 def test_get_version_str(mock_fs: testing.MockFs):
@@ -400,6 +430,33 @@ def test_get_version_str(mock_fs: testing.MockFs):
   assert _find_builder_dir('ds:1.0.0') == 'path/to/ds/1.0.0'
   assert _find_builder_dir('ds:1.3.*') is None
   assert _find_builder_dir('ds:2.3.5') is None
+
+  # No matching version found, updated error context.
+  requested_version = '1.3.*'
+  builder_dir = 'path/to/ds/'
+  error_msg = (f'No version matching the requested {requested_version} was '
+               f'found in the builder directory: {builder_dir}.')
+  with (pytest.raises(registered.DatasetNotFoundError, match=error_msg),
+        error_utils.reraise_with_context(registered.DatasetNotFoundError)):
+    assert get_version_str(requested_version=requested_version) is None
+    raise registered.DatasetNotFoundError
+
+
+def test_get_version_str_empty_builder_dir(mock_fs: testing.MockFs):
+  builder_dir = 'path/to/ds/'
+  error_msg = (f'The builder directory {builder_dir} doesn\'t contain any '
+               'versions.')
+
+  mock_fs.add_file(f'{builder_dir}features.json')
+  get_version_str = functools.partial(
+      read_only_builder._get_version_str,
+      'path/to/ds/'  # pylint: disable=protected-access
+  )
+
+  with (pytest.raises(registered.DatasetNotFoundError, match=error_msg),
+        error_utils.reraise_with_context(registered.DatasetNotFoundError)):
+    assert get_version_str() is None
+    raise registered.DatasetNotFoundError
 
 
 def test_builder_from_directories_splits(mock_fs: testing.MockFs):
