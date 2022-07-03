@@ -47,7 +47,7 @@ Tree = type_utils.Tree
 # See
 # https://stackoverflow.com/questions/14946264/python-lru-cache-decorator-per-instance
 # For @property methods, use @memoized_property below.
-memoize = functools.lru_cache
+memoize = functools.lru_cache(maxsize=128)
 
 T = TypeVar('T')
 U = TypeVar('U')
